@@ -21,37 +21,15 @@ chrome_utils.CHROME_USER_DATA_DIR = os.path.join(
     os.path.expanduser("~"), "AppData", "Local", "Temp", "chrome_dev_profile_9333"
 )
 
-# start or attach chrome (will print port number from chrome_utils)
-chrome_utils.start_chrome()
-print("Chrome 起動完了（ポート9333）。ブラウザで操作してください。準備できたら Enter を押してください...")
-input()
-
-# load environment and sheet id
-load_dotenv()
-SS_ID = os.getenv("SS_SD_CUS_ID")
+# placeholders - actual initialization (Chrome, gspread, page) is done in main()
+gc = None
+sh = None
+ws = None
+page = None
+base_tab = None
+SS_ID = None
 CREDENTIAL_PATH = r"C:\data\dev\sd_cus\credentials.json"
 TOKEN_PATH = r"C:\data\dev\sd_cus\token.json"
-
-# Initialize gspread at import time (like sd_cus.py) using provided credentials/token
-try:
-    gc = gspread.oauth(
-        credentials_filename=CREDENTIAL_PATH,
-        authorized_user_filename=TOKEN_PATH
-    )
-    sh = gc.open_by_key(SS_ID)
-    ws = sh.worksheet("CUS_TO_SD")
-    print(f"スプレッドシートを開きました: {SS_ID}")
-except Exception as e:
-    gc = None
-    sh = None
-    ws = None
-    print('スプレッドシート初期化失敗:', e)
-
-# connect to the running chrome on the configured debug port (9333)
-co = ChromiumOptions()
-co.set_local_port(9333)
-page = ChromiumPage(co)
-base_tab = page.get_tab(page.latest_tab)
 
 
 def get_col(row_data, idx):
@@ -508,17 +486,48 @@ def main():
     parser.add_argument('--shop-file', '-f', help='処理する店舗コードを改行で並べたファイルパス')
     parser.add_argument('--ss-id', help='処理するスプレッドシートのID（省略時は環境変数を使用）')
     args = parser.parse_args()
-
     # runtime controls
     START_TIME = time.time()
     MAX_RUNTIME_SEC = 6 * 3600  # 6 hours
 
     # night window: 20:00-07:59 local time (host system time)
     hour_now = datetime.now().hour
-    allow_send = True
     if hour_now >= 20 or hour_now < 8:
-        allow_send = False
-        print("夜間時間帯のため送信は無効化されます（20:00-08:00）。送信を行わずスキップします。")
+        print("夜間時間帯のため処理を停止します（20:00-08:00）。終了します。")
+        return
+
+    # not night: allow sends unless per-record check later overrides
+    allow_send = True
+
+    # start or attach chrome (will print port number from chrome_utils)
+    chrome_utils.start_chrome()
+    print("Chrome 起動完了（ポート9333）。ブラウザで操作してください。準備できたら Enter を押してください...")
+    try:
+        input()
+    except Exception:
+        pass
+
+    # load environment and sheet id
+    load_dotenv()
+    SS_ID = os.getenv("SS_SD_CUS_ID")
+
+    # Initialize gspread here (after night check and after user confirmation)
+    try:
+        gc = gspread.oauth(credentials_filename=CREDENTIAL_PATH, authorized_user_filename=TOKEN_PATH)
+        sh = gc.open_by_key(SS_ID)
+        ws = sh.worksheet("CUS_TO_SD")
+        print(f"スプレッドシートを開きました: {SS_ID}")
+    except Exception as e:
+        gc = None
+        sh = None
+        ws = None
+        print('スプレッドシート初期化失敗:', e)
+
+    # connect to the running chrome on the configured debug port (9333)
+    co = ChromiumOptions()
+    co.set_local_port(9333)
+    page = ChromiumPage(co)
+    base_tab = page.get_tab(page.latest_tab)
 
     # CLI flags
     save_debug = True if getattr(args, 'save_debug', False) else False
