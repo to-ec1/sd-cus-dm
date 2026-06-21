@@ -13,7 +13,18 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 
 # match sd_cus.py startup: ensure .313p utilities in path, then import start_chrome
 sys.path.append(r"C:\data\dev\.313p")
-from chrome_utils import start_chrome
+import chrome_utils
+
+# set debug port to 9333 to mirror sd_cus.py behavior but using 9333
+chrome_utils.CHROME_DEBUG_PORT = 9333
+chrome_utils.CHROME_USER_DATA_DIR = os.path.join(
+    os.path.expanduser("~"), "AppData", "Local", "Temp", "chrome_dev_profile_9333"
+)
+
+# start or attach chrome (will print port number from chrome_utils)
+chrome_utils.start_chrome()
+print("Chrome 起動完了（ポート9333）。ブラウザで操作してください。準備できたら Enter を押してください...")
+input()
 
 # load environment and sheet id
 load_dotenv()
@@ -36,8 +47,7 @@ except Exception as e:
     ws = None
     print('スプレッドシート初期化失敗:', e)
 
-# start or attach chrome and prepare DrissionPage connection
-start_chrome()
+# connect to the running chrome on the configured debug port (9333)
 co = ChromiumOptions()
 co.set_local_port(9333)
 page = ChromiumPage(co)
