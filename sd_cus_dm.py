@@ -592,7 +592,10 @@ def main():
     if args.code:
         c = args.code.strip()
         code_use = c
-        res = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send)
+        # re-evaluate allow_send at call time to handle runtime crossings into night window
+        hour_now = datetime.now().hour
+        allow_send_now = not (hour_now >= 20 or hour_now < 8)
+        res = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
         # single-line summary output
         if res is True:
             print(f"{code_use} のメッセージ送信完了。エラーなし")
@@ -614,7 +617,9 @@ def main():
         for code in codes:
             code_use = code
             try:
-                result = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send)
+                hour_now = datetime.now().hour
+                allow_send_now = not (hour_now >= 20 or hour_now < 8)
+                result = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
                 if result in ("blocked", "login_redirect", "nav_failure"):
                     print(f"処理を中断しました（理由: {result}）。")
                     return
@@ -648,8 +653,10 @@ def main():
         code = get_col(row, 1)
         if not code:
             continue
-        try:
-            result = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send)
+            try:
+                hour_now = datetime.now().hour
+                allow_send_now = not (hour_now >= 20 or hour_now < 8)
+                result = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
             if result in ("blocked", "login_redirect", "nav_failure"):
                 print(f"処理を中断しました（理由: {result}）。処理済み件数でスプレッドシートは更新済みです。")
                 break
