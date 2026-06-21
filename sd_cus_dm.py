@@ -653,10 +653,10 @@ def main():
         code = get_col(row, 1)
         if not code:
             continue
-            try:
-                hour_now = datetime.now().hour
-                allow_send_now = not (hour_now >= 20 or hour_now < 8)
-                result = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
+        try:
+            hour_now = datetime.now().hour
+            allow_send_now = not (hour_now >= 20 or hour_now < 8)
+            result = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
             if result in ("blocked", "login_redirect", "nav_failure"):
                 print(f"処理を中断しました（理由: {result}）。処理済み件数でスプレッドシートは更新済みです。")
                 break
