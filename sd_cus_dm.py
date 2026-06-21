@@ -3,10 +3,10 @@ import os
 import sys
 import time
 import random
+import math
 import glob
 import argparse
 from datetime import datetime
-
 from dotenv import load_dotenv
 import gspread
 from DrissionPage import ChromiumPage, ChromiumOptions
@@ -15,10 +15,9 @@ from DrissionPage import ChromiumPage, ChromiumOptions
 sys.path.append(r"C:\data\dev\.313p")
 from chrome_utils import start_chrome
 
+# load environment and sheet id
 load_dotenv()
-
 SS_ID = os.getenv("SS_SD_CUS_ID")
-
 CREDENTIAL_PATH = r"C:\data\dev\sd_cus\credentials.json"
 TOKEN_PATH = r"C:\data\dev\sd_cus\token.json"
 
@@ -57,18 +56,110 @@ def read_body_from_file(path):
         return None
 
 
-def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2.5), interactive=False, save_debug=False):
+def human_delay(mean=0.0, sigma=0.6, minimum=0.2):
+    """Sleep a small, log-normal-like human delay (no network activity)."""
+    try:
+        val = math.exp(random.gauss(mean, sigma))
+        time.sleep(max(minimum, val))
+    except Exception:
+        time.sleep(minimum)
+
+
+def detect_block(tab):
+    """
+    ページ遷移後にBOT検知・セッション切れを判定する。
+    戻り値: "blocked" | "login_redirect" | None
+    """
+    try:
+        current_url = tab.url or ""
+    except Exception:
+        current_url = ""
+
+    # ログイン画面へリダイレクトされた場合
+    if "/login" in current_url or "login.do" in current_url:
+        return "login_redirect"
+
+    try:
+        body_text = tab.run_js("return document.body ? document.body.innerText : '';", as_expr=True) or ""
+    except Exception:
+        body_text = ""
+
+    block_keywords = ["403", "Forbidden", "アクセスが拒否", "ページが見つかりません", "Access Denied"]
+    for kw in block_keywords:
+        if kw in body_text:
+            return "blocked"
+
+    return None
+
+
+def print_packets(packets, step_label):
+    # concise output: status and URL only
+    if not packets:
+        print(f"  [{step_label}] 通信なし")
+        return
+    if not isinstance(packets, list):
+        packets = [packets]
+    print(f"  [{step_label}] 捕捉: {len(packets)} 件")
+    for p in packets:
+        try:
+            url = getattr(p, 'url', '')
+            status = None
+            if not getattr(p, 'is_failed', False) and getattr(p, 'response', None) is not None:
+                try:
+                    status = p.response.status
+                except Exception:
+                    status = None
+            label = str(status) if status is not None else 'ERR'
+            # mark errors (4xx/5xx) clearly
+            mark = 'ERROR' if (isinstance(status, int) and status >= 400) else 'OK'
+            print(f"  [{mark}] {label} {url}")
+        except Exception:
+            print(f"  [ERR] パケット解析失敗 {getattr(p, 'url', '')}")
+
+
+def drain(tab, step_label, timeout=2.0):
+    # silent drain: consume recent packets without printing
+    try:
+        _ = tab.listen.wait(count=999, timeout=timeout, fit_count=False)
+    except Exception:
+        pass
+
+
+def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2.5), interactive=False, save_debug=False, perform_send=True):
     url = f"https://www.superdelivery.com/l/management/customer/detail.do?code={code}"
     print(f"処理: {code} -> {url}")
+    # start passive network capture on the tab (no extra requests)
     try:
+        try:
+            tab.listen.start(targets=True, method=True, res_type=True)
+        except Exception:
+            pass
         tab.get(url)
     except Exception:
         try:
             tab.open(url)
         except Exception:
             print('ページ遷移に失敗しました')
-            return False
+            return "nav_failure"
     time.sleep(random.uniform(3.0, 5.0))
+    try:
+        drain(tab, "STEP1 詳細ページ遷移", timeout=2.5)
+    except Exception:
+        pass
+
+    # BOT検知・セッション切れチェック
+    block_reason = detect_block(tab)
+    if block_reason == "login_redirect":
+        print(f"[{code}] セッション切れ: ログイン画面へリダイレクトされました。処理を停止します。")
+        return "login_redirect"
+    elif block_reason == "blocked":
+        print()
+        print("=" * 60)
+        print(f"BOT検知またはアクセス拒否 ({code})")
+        print("  対処: 時間を置いてから再実行してください。")
+        print("=" * 60)
+        print()
+        return "blocked"
 
     # ループごとに必ず一時停止（インタラクティブ時）
     if interactive:
@@ -101,6 +192,8 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         if btn:
             break
 
+    # small pre-click jitter to mimic human hesitation
+    human_delay(mean=-0.5, sigma=0.5, minimum=0.15)
     if not btn:
         # 念のためJSで検索
         try:
@@ -176,8 +269,17 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
                 pass
 
     if not new_tab:
-        print('編集タブを開けません。')
-        return False
+        print('編集タブを開きません。')
+        return "nav_failure"
+
+    # 新タブ側も受動的に通信を監視
+    try:
+        try:
+            new_tab.listen.start(targets=True, method=True, res_type=True)
+        except Exception:
+            pass
+    except Exception:
+        pass
 
     # 対話モードならここで一時停止して目視確認させる
     if interactive:
@@ -277,6 +379,12 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
 
     approaches.append(('find_inputs', approach_find_inputs))
 
+    # randomize approach order slightly to avoid deterministic pattern
+    try:
+        random.shuffle(approaches)
+    except Exception:
+        pass
+
     success_method = None
     for name, func in approaches:
         try:
@@ -293,7 +401,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
             check_body = new_tab.run_js("return document.getElementById('new-mail-body') ? document.getElementById('new-mail-body').value : null;", as_expr=True)
         except Exception:
             check_body = None
-        print(f"アプローチ {name} → セット後: 件名='{check_subj}' 本文長={len(check_body) if check_body else 0}")
+        # concise mode: do not print per-approach debug output
 
         # give browser a moment to process input
         time.sleep(1.0)
@@ -312,7 +420,8 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
                 break
 
     if not success_method:
-        print("件名・本文のセット確認をスキップしました（検証JS限界）。送信処理を続行します。")
+        # skip verbose confirmation; continue with send flow
+        pass
     # デバッグ用に現在の編集タブのHTMLを保存（オプトイン）
     if save_debug:
         try:
@@ -348,14 +457,24 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         pass
     time.sleep(random.uniform(1.0, 2.0))
 
+    try:
+        drain(new_tab, "STEP4 確認画面へ遷移後", timeout=2.5)
+    except Exception:
+        pass
     # 送信ボタンを押す
+    # If sending is disabled (night mode), skip actual send and return special code
+    if not perform_send:
+        return "night_disabled"
     try:
         new_tab.run_js("var s=document.querySelector(\"input[value='メッセージを送信'], input[value*='送信']\"); if(s) s.click();")
     except Exception:
         pass
-
     # wait after sending to ensure request completes
     time.sleep(random.uniform(1.5, 3.0))
+    try:
+        drain(new_tab, "STEP5 送信ボタンクリック後", timeout=2.5)
+    except Exception:
+        pass
 
     # タブを閉じて元に戻る
     try:
@@ -367,7 +486,6 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
     except Exception:
         pass
 
-    print(f"{code} のメッセージ送信完了。")
     return True
 
 
@@ -380,6 +498,17 @@ def main():
     parser.add_argument('--shop-file', '-f', help='処理する店舗コードを改行で並べたファイルパス')
     parser.add_argument('--ss-id', help='処理するスプレッドシートのID（省略時は環境変数を使用）')
     args = parser.parse_args()
+
+    # runtime controls
+    START_TIME = time.time()
+    MAX_RUNTIME_SEC = 6 * 3600  # 6 hours
+
+    # night window: 20:00-07:59 local time (host system time)
+    hour_now = datetime.now().hour
+    allow_send = True
+    if hour_now >= 20 or hour_now < 8:
+        allow_send = False
+        print("夜間時間帯のため送信は無効化されます（20:00-08:00）。送信を行わずスキップします。")
 
     # CLI flags
     save_debug = True if getattr(args, 'save_debug', False) else False
@@ -453,7 +582,15 @@ def main():
     if args.code:
         c = args.code.strip()
         code_use = c
-        send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug)
+        res = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send)
+        # single-line summary output
+        if res is True:
+            print(f"{code_use} のメッセージ送信完了。エラーなし")
+        elif res == "night_disabled":
+            print(f"{code_use} の送信は夜間のためスキップされました")
+        else:
+            print(f"{code_use} の処理エラー: {res}")
+        return
         return
 
     if args.shop_file:
@@ -467,7 +604,13 @@ def main():
         for code in codes:
             code_use = code
             try:
-                send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug)
+                result = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send)
+                if result in ("blocked", "login_redirect", "nav_failure"):
+                    print(f"処理を中断しました（理由: {result}）。")
+                    return
+                if result == "night_disabled":
+                    print(f"{code_use} の送信は夜間のためスキップされました")
+                    continue
             except Exception as e:
                 print(f"{code} の処理中にエラー: {e}")
             time.sleep(random.uniform(1.0, 2.0))
@@ -481,6 +624,13 @@ def main():
     records = ws_local.get_all_values()
 
     for i, row in enumerate(records):
+        # runtime: stop if exceeded max runtime
+        try:
+            if time.time() - START_TIME > MAX_RUNTIME_SEC:
+                print("⏰ 実行時間上限（6h）到達: 安全終了します")
+                break
+        except Exception:
+            pass
         be = get_col(row, 56)
         bf = get_col(row, 57)
         if not be or bf:
@@ -489,20 +639,41 @@ def main():
         if not code:
             continue
         try:
-            ok = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug)
-            if ok:
+            result = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send)
+            if result in ("blocked", "login_redirect", "nav_failure"):
+                print(f"処理を中断しました（理由: {result}）。処理済み件数でスプレッドシートは更新済みです。")
+                break
+            if result == "night_disabled":
+                print(f"{code} の送信は夜間のためスキップされました")
+                continue
+            if result is True:
                 now = datetime.now()
                 date_str = f"{now.month}/{now.day}"
                 rownum = i + 1
+                # single-line success output; still update sheet but do not print extra lines
                 try:
                     ws_local.update(values=[[date_str]], range_name=f"BF{rownum}:BF{rownum}")
-                    print(f"行 {rownum} の列BFに日付を記録しました: {date_str}")
-                except Exception as e:
-                    print(f"スプレッドシート更新失敗: {e}")
+                except Exception:
+                    pass
+                print(f"{code} のメッセージ送信完了。エラーなし")
         except Exception as e:
             print(f"{code} の処理中にエラー: {e}")
         time.sleep(random.uniform(1.0, 3.0))
 
 
 if __name__ == '__main__':
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        try:
+            print('\n処理を中断しました（KeyboardInterrupt） — 安全に停止します')
+        except Exception:
+            pass
+    except SystemExit as e:
+        try:
+            print(f'\n終了: {e}')
+        except Exception:
+            pass
+    except Exception as e:
+        print(f'\n予期しない例外: {e}')
+        raise
