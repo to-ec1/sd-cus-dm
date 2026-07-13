@@ -100,7 +100,78 @@ def detect_block(tab):
     return None
 
 
-def print_packets(packets, step_label):
+def check_trading_status(tab, code):
+    """
+    軽量な事前チェック（引き継ぎ書 9章・10章の検証結果に基づく実装）。
+
+    detail.doページを実際にレンダリングせず、同一セッション(Cookie)のまま
+    同期XHRでHTMLソースのみ取得し、静的に埋め込まれている「取引を中止する」
+    フォーム(action: trading/cancel/execute.do)の有無で取引可否を判定する。
+
+    「メッセージを送る」ボタン自体はJS動的挿入のため生HTMLでは判定できないが、
+    検証の結果(419853/648228および取引可10件)、取引中止フォームの有無と
+    常に一致することを確認済み。
+
+    戻り値:
+        "active"         -> 取引中（メッセージ送信へ進んでよい）
+        "withdrawn"       -> 退会済み（取引中止フォームなし）
+        "login_redirect"  -> ログイン画面へリダイレクトされた
+        "blocked"         -> BOT検知/アクセス拒否と思われる応答
+        "check_failed"    -> チェック自体が失敗（安全側に倒し緊急停止させる）
+    """
+    url = f"{SD_BASE_URL}/l/management/customer/detail.do?code={code}"
+    js = """
+        var xhr = new XMLHttpRequest();
+        var result;
+        try {
+            xhr.open('GET', arguments[0], false);
+            xhr.send(null);
+            result = JSON.stringify({status: xhr.status, responseURL: xhr.responseURL, text: xhr.responseText});
+        } catch (e) {
+            result = JSON.stringify({error: String(e)});
+        }
+        return result;
+    """
+    try:
+        raw = tab.run_js(js, url)
+    except Exception as e:
+        print(f"⚠️ [{code}] 事前チェック用XHRの実行自体に失敗しました: {e}")
+        return "check_failed"
+
+    if not raw:
+        print(f"⚠️ [{code}] 事前チェックのレスポンスが空でした。")
+        return "check_failed"
+
+    try:
+        data = json.loads(raw)
+    except Exception:
+        print(f"⚠️ [{code}] 事前チェックのレスポンス解析に失敗しました: {str(raw)[:200]}")
+        return "check_failed"
+
+    if "error" in data:
+        print(f"⚠️ [{code}] 事前チェックのXHRが例外を投げました: {data['error']}")
+        return "check_failed"
+
+    status = data.get("status")
+    response_url = data.get("responseURL") or ""
+    text = data.get("text") or ""
+
+    if "/login" in response_url or "login.do" in response_url:
+        return "login_redirect"
+
+    if isinstance(status, int) and status in (403, 429, 500, 502, 503, 504):
+        print(f"🚨 [{code}] 事前チェックでHTTP {status} を検知しました。BOT検知/アクセス制限の可能性が高いため緊急停止します。")
+        return "blocked"
+
+    block_keywords = ["403", "Forbidden", "アクセスが拒否", "ページが見つかりません", "Access Denied"]
+    for kw in block_keywords:
+        if kw in text:
+            return "blocked"
+
+    if "trading/cancel/execute.do" in text:
+        return "active"
+    else:
+        return "withdrawn"
     if not packets:
         print(f"  [{step_label}] 通信なし")
         return
@@ -327,6 +398,43 @@ def login_to_target_site(tab):
 def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2.5), interactive=False, save_debug=False, perform_send=True):
     url = f"{SD_BASE_URL}/l/management/customer/detail.do?code={code}"
     print(f"🔍 処理開始店舗コード: {code} -> {url}")
+
+    # --- 軽量事前チェック（引き継ぎ書 9章・10章の検証結果に基づく） ---
+    # detail.doを実際にレンダリングする前に、同一セッション(Cookie)のまま同期XHRで
+    # 生HTMLのみ取得し、「取引を中止する」フォーム(action: trading/cancel/execute.do)の
+    # 有無だけで退会済みかどうかを先に判定する。
+    # 退会済みと判定できれば、この後の重いページロード(4〜6秒sleep)・DOM検索を丸ごとスキップできる。
+    status_check = check_trading_status(tab, code)
+
+    if status_check == "withdrawn":
+        print(f"🚪 [{code}] 事前チェック(軽量XHR)で退会済みと判定しました。詳細ページの完全ロードはスキップします。")
+        return "withdrawn"
+
+    if status_check == "blocked":
+        print(f"🚨 [{code}] 事前チェック(軽量XHR)でBOT検知/アクセス拒否の兆候を検出しました。安全のため緊急停止します。")
+        return "blocked"
+
+    if status_check == "login_redirect":
+        print(f"⚠️ [{code}] 事前チェック(軽量XHR)でセッション切れを検出しました。再ログインを試みます。")
+        if login_to_target_site(tab):
+            status_check = check_trading_status(tab, code)
+            if status_check == "withdrawn":
+                print(f"🚪 [{code}] 再ログイン後の事前チェックで退会済みと判定しました。")
+                return "withdrawn"
+            if status_check != "active":
+                print(f"❌ [{code}] 再ログイン後も事前チェックが正常な結果(active)を返しませんでした（結果: {status_check}）。安全のため緊急停止します。")
+                return "login_redirect"
+        else:
+            return "login_redirect"
+    elif status_check == "check_failed":
+        # 判定不能な場合は安全側に倒し、憶測で処理を続けず緊急停止する（デバッグ鉄則）
+        print(f"⚠️ [{code}] 事前チェック自体が失敗しました。原因不明のまま処理を続けるのは危険なため緊急停止します。")
+        return "emergency_stop"
+    elif status_check != "active":
+        print(f"⚠️ [{code}] 事前チェックが想定外の値を返しました（結果: {status_check}）。安全のため緊急停止します。")
+        return "emergency_stop"
+
+    # status_check == "active" の場合のみ、以降の通常フロー（実ページ表示→ボタン確認→送信）へ進む
     try:
         try:
             tab.listen.start(targets=True, method=True, res_type=True)
@@ -396,10 +504,20 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
 
     human_delay(mean=-0.5, sigma=0.5, minimum=0.15)
     if not btn:
+        # 現在地確認: 詳細ページ自体は開けているが「メッセージを送る」ボタンが存在しないケース。
+        # 退会済み会員のページはこの状態になることが確認済み。
+        # ⚠️ 以前はここで汎用の /i/msgbox/edit を強制的に開くフォールバックに流れ込んでいたが、
+        #    宛先コードが紐付かない汎用ページのため誤送信検知(code_unconfirmed)の原因になっていた。
+        #    ボタンが無い場合は送信を試みず、ここで明確に判定して終了する。
         try:
-            tab.run_js("var b=document.querySelector(\"input[value*='メッセージ']\"); if(b) b.click();")
+            current_url_check = tab.url or ""
         except Exception:
-            print("❌ メッセージボタンが見つかりません。不正検知・レイアウト変更の可能性があるため緊急停止します。")
+            current_url_check = ""
+        if "/detail.do" in current_url_check and f"code={code}" in current_url_check:
+            print(f"🚪 [{code}] 詳細ページは表示できましたが「メッセージを送る」ボタンが存在しません。退会済み会員と判定します。（現在地: {current_url_check}）")
+            return "withdrawn"
+        else:
+            print(f"❌ [{code}] メッセージボタンが見つからず、想定の詳細ページにもいません（現在地: {current_url_check}）。不正検知・レイアウト変更の可能性があるため緊急停止します。")
             return "emergency_stop"
     else:
         try:
@@ -868,10 +986,19 @@ def main():
 
     # ── 🎲 起動時ランダム待機（cron固定時刻によるBOT検知パターン化を回避） ──────────
     # --code / --interactive 指定時（手動デバッグ実行）は待機せずスキップする
-    if not args.no_jitter and not args.code and not args.interactive:
+    # さらに、GitHub Actionsの手動実行(workflow_dispatch)は人間がボタンを押した時刻＝
+    # 元々ランダムなので、cron(schedule)実行時のみ待機すれば十分。
+    # GITHUB_EVENT_NAMEはGitHub Actions実行環境で自動的に設定される環境変数
+    # （schedule実行なら"schedule"、手動実行なら"workflow_dispatch"）。
+    # ローカル実行時は未設定になるため、その場合も待機不要と判断する。
+    github_event_name = os.environ.get("GITHUB_EVENT_NAME", "")
+    is_cron_trigger = (github_event_name == "schedule")
+    if not args.no_jitter and not args.code and not args.interactive and is_cron_trigger:
         jitter_sec = random.uniform(0, 300)  # 0〜5分
         print(f"🎲 起動時刻の固定パターン化を避けるため {jitter_sec:.1f} 秒間ランダム待機します...")
         time.sleep(jitter_sec)
+    elif not args.no_jitter and not args.code and not args.interactive:
+        print(f"🎲 起動時ランダム待機はスキップします（トリガー: {github_event_name or 'ローカル実行'}。cron(schedule)実行時のみ待機します）")
 
     START_TIME = time.time()
     MAX_RUNTIME_SEC = 6 * 3600
@@ -1182,6 +1309,8 @@ def main():
             print(f"✅ {code_use} のメッセージ送信完了。エラーなし")
         elif res == "night_disabled":
             print(f"⚠️ {code_use} の送信は夜間のためスキップされました")
+        elif res == "withdrawn":
+            print(f"🚪 {code_use} は退会済み会員と判定されました（メッセージ送信ボタンなし）")
         else:
             print(f"❌ {code_use} の処理エラー: {res}")
         return
@@ -1219,6 +1348,10 @@ def main():
                     return
                 if result == "night_disabled":
                     print(f"⚠️ {code_use} の送信は夜間のためスキップされました")
+                    continue
+                if result == "withdrawn":
+                    consecutive_failures = 0
+                    print(f"🚪 {code_use} は退会済みのためスキップし、次のコードへ進みます。")
                     continue
                 if result is True:
                     consecutive_failures = 0
@@ -1315,6 +1448,18 @@ def main():
                 break
             if result == "night_disabled":
                 print(f"⚠️ {code} の送信は夜間のためスキップされました")
+                continue
+            if result == "withdrawn":
+                consecutive_failures = 0
+                now = datetime.now(JST)
+                date_str = f"{now.month}/{now.day}"
+                rownum = i + 1
+                try:
+                    ws.update(values=[[f"{date_str}退会"]], range_name=f"BF{rownum}:BF{rownum}")
+                    print(f"📝 スプレッドシートの BF{rownum} 列に退会記録（{date_str}退会）を書き込みました")
+                except Exception as e:
+                    print(f"⚠️ スプレッドシートへの退会記録書き込みに失敗しました（判定自体は成功しています）: {e}")
+                print(f"🚪 {code} は退会済みのためスキップし、次の行へ進みます。")
                 continue
 
             if result is True:
