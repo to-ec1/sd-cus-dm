@@ -1427,6 +1427,21 @@ def main():
 
         print(f"\n👉 [バッチ{batch_no} 進捗: {sent_count + 1}/{MAX_SEND_PER_RUN}｜累計: {total_sent_count + 1}件目] スプレッドシート {i+1} 行目の店舗 {code} の処理を開始します。")
 
+        # ⚠️ 二重送信防止・多層防御その2（2026/7/13 727333の二重送信事故を受けて追加）
+        # concurrency設定でワークフローの同時実行自体は防止したが、念のため、
+        # 実際に送信処理へ入る直前に、当該行のBF列だけをスプレッドシートからライブで
+        # 再取得し、起動時スナップショット取得後に他プロセス（別ブランチ実行・ローカル実行等）
+        # によって既に処理済みになっていないかを確認する。
+        rownum = i + 1
+        try:
+            live_bf = ws.cell(rownum, 58).value  # BF列 = 58列目(1-indexed)
+        except Exception as e:
+            live_bf = None
+            print(f"⚠️ [{code}] 送信直前のライブ再確認に失敗しました（原因: {e}）。判定不能のため、通常通り処理を続行します。")
+        if live_bf:
+            print(f"⏭️ [{code}] 送信直前のライブ再確認でBF{rownum}列に既に記録（'{live_bf}'）があることを検知しました。他プロセスにより処理済みと判断し、二重送信回避のためスキップします。")
+            continue
+
         try:
             result = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
 
