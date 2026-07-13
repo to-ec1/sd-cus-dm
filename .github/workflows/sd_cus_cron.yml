@@ -4,6 +4,14 @@ on:
     # 毎日午前1時（日本時間午前10時、夜間対象外時間）に自動実行
     - cron: '0 1 * * *'
   workflow_dispatch: # 手動実行可能にするトリガー
+
+# ⚠️ 二重実行防止（2026/7/13 727333の二重送信事故を受けて追加）
+# 同じグループ名の実行は常に1個までに制限する。
+# 新しい実行が開始されると、まだ走っている古い実行は自動的にキャンセルされる。
+concurrency:
+  group: sd-cus-dm-scheduled-sync
+  cancel-in-progress: true
+
 jobs:
   run-send:
     runs-on: ubuntu-latest
