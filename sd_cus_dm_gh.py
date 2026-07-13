@@ -163,12 +163,15 @@ def check_trading_status(tab, code):
         print(f"🚨 [{code}] 事前チェックでHTTP {status} を検知しました。BOT検知/アクセス制限の可能性が高いため緊急停止します。")
         return "blocked"
 
-    block_keywords = ["403", "Forbidden", "アクセスが拒否", "ページが見つかりません", "Access Denied"]
+    # ⚠️ 以前は "403" も含めていたが、画像ファイル名(例: .../2403291438126fe9a5f62f.jpg)等の
+    #    無関係な文脈に頻出する汎用的な数字列のため、誤検知(919048)が確定した（2026/7/13）。
+    #    実際のHTTP 403応答は直前のstatusコード分岐で別途正しく検知されるため、
+    #    このテキストキーワードとしての"403"は削除して問題ない。
+    block_keywords = ["Forbidden", "アクセスが拒否", "ページが見つかりません", "Access Denied"]
     for kw in block_keywords:
         idx = text.find(kw)
         if idx != -1:
             # 診断用: 実際のHTTPステータス・一致したキーワード・前後の文脈を必ず出力する。
-            # (どのキーワードが誤検知の原因になっているか事実で特定するため。挙動自体は変更しない)
             snippet = text[max(0, idx - 40):idx + len(kw) + 40].replace("\n", " ").replace("\r", "")
             print(f"🚨 [{code}] 事前チェックでキーワード一致による退会/ブロック判定: status={status} 一致文字列='{kw}' 前後文脈='...{snippet}...'")
             return "blocked"
