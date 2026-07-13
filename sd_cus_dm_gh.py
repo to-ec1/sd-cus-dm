@@ -165,33 +165,18 @@ def check_trading_status(tab, code):
 
     block_keywords = ["403", "Forbidden", "アクセスが拒否", "ページが見つかりません", "Access Denied"]
     for kw in block_keywords:
-        if kw in text:
+        idx = text.find(kw)
+        if idx != -1:
+            # 診断用: 実際のHTTPステータス・一致したキーワード・前後の文脈を必ず出力する。
+            # (どのキーワードが誤検知の原因になっているか事実で特定するため。挙動自体は変更しない)
+            snippet = text[max(0, idx - 40):idx + len(kw) + 40].replace("\n", " ").replace("\r", "")
+            print(f"🚨 [{code}] 事前チェックでキーワード一致による退会/ブロック判定: status={status} 一致文字列='{kw}' 前後文脈='...{snippet}...'")
             return "blocked"
 
     if "trading/cancel/execute.do" in text:
         return "active"
     else:
         return "withdrawn"
-    if not packets:
-        print(f"  [{step_label}] 通信なし")
-        return
-    if not isinstance(packets, list):
-        packets = [packets]
-    print(f"  [{step_label}] 捕捉: {len(packets)} 件")
-    for p in packets:
-        try:
-            url = getattr(p, 'url', '')
-            status = None
-            if not getattr(p, 'is_failed', False) and getattr(p, 'response', None) is not None:
-                try:
-                    status = p.response.status
-                except Exception:
-                    status = None
-            label = str(status) if status is not None else 'ERR'
-            mark = 'ERROR' if (isinstance(status, int) and status >= 400) else 'OK'
-            print(f"  [{mark}] {label} {url}")
-        except Exception:
-            print(f"  [ERR] パケット解析失敗 {getattr(p, 'url', '')}")
 
 
 def drain(tab, step_label, timeout=2.0):
