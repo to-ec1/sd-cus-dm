@@ -286,7 +286,7 @@ def login_to_target_site(tab):
 
     try:
         tab.get(login_url)
-        time.sleep(5)  # ロード完了を十分に待機
+        time.sleep(2.0)  # ログインページの読み込み待ちを短縮
 
         # 🧪 診断情報収集開始
         current_url = tab.url or ""
@@ -324,7 +324,7 @@ def login_to_target_site(tab):
         except Exception:
             tab.run_js("document.getElementById('input-id').value = '';")
         id_ele.input(username)
-        time.sleep(1.0)
+        time.sleep(0.3)
 
         # 2. パスワード入力欄の取得と入力
         pass_ele = tab.ele("#input-pass", timeout=5) or tab.ele("@name=password", timeout=5)
@@ -338,7 +338,7 @@ def login_to_target_site(tab):
         except Exception:
             tab.run_js("document.getElementById('input-pass').value = '';")
         pass_ele.input(password)
-        time.sleep(1.0)
+        time.sleep(0.3)
 
         # 3. ログインボタンの取得とクリック
         btn_ele = tab.ele("input.formbtn", timeout=5) or tab.ele("@type=submit", timeout=5)
@@ -352,8 +352,8 @@ def login_to_target_site(tab):
         # 4. ログイン成功の確実な判定（ログイン画面のコンテナ「#unique-common-login」の消失を検知）
         print("⏳ 画面遷移とログイン認証結果を待機しています...")
         login_success = False
-        for attempt in range(15):  # 最大15秒待機
-            time.sleep(1.0)
+        for attempt in range(8):  # 最大8秒待機
+            time.sleep(0.5)
             # ログインコンテナが存在するか確認
             try:
                 login_container = tab.ele("#unique-common-login", timeout=1)
@@ -435,8 +435,8 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         except Exception:
             print('❌ ページ遷移に致命的な失敗が発生しました')
             return "nav_failure"
-    time.sleep(random.uniform(4.0, 6.0)) # 最初のロード時間を十分に確保
-    http_err = drain_and_check_http(tab, "STEP1 詳細ページ遷移", code, timeout=2.5)
+    time.sleep(random.uniform(1.5, 2.5))  # 初回ロードの安定化は維持しつつ、待機は短縮
+    http_err = drain_and_check_http(tab, "STEP1 詳細ページ遷移", code, timeout=2.0)
     if http_err:
         return "emergency_stop"
 
@@ -446,7 +446,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         if login_to_target_site(tab):
             try:
                 tab.get(url)
-                time.sleep(4)
+                time.sleep(1.5)
                 block_reason = detect_block(tab)
             except Exception:
                 return "login_redirect"
@@ -518,8 +518,8 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
                 return "emergency_stop"
 
     new_tab = None
-    for _ in range(10):
-        time.sleep(1.0 if (interactive and sys.stdin.isatty()) else 0.4)
+    for _ in range(8):
+        time.sleep(0.4 if (interactive and sys.stdin.isatty()) else 0.2)
         try:
             handles_after = list(browser_page.tab_ids)
         except Exception:
@@ -559,7 +559,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         if not new_tab:
             try:
                 tab.run_js(f"window.open('{SD_BASE_URL}/i/msgbox/edit','_blank');")
-                time.sleep(0.8)
+                time.sleep(0.3)
                 handles_after = list(browser_page.tab_ids)
                 for h in handles_after:
                     if h not in handles_before:
@@ -592,7 +592,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
 
     subj_found = False
     body_found = False
-    for _ in range(20):
+    for _ in range(12):
         try:
             subj_found = bool(new_tab.ele('css:#new-mail-subject', timeout=1))
         except Exception:
@@ -603,7 +603,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
             body_found = False
         if subj_found or body_found:
             break
-        time.sleep(0.3)
+        time.sleep(0.15)
 
     approaches = []
 
@@ -686,7 +686,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
             func(new_tab)
         except Exception:
             pass
-        time.sleep(0.8)
+        time.sleep(0.25)
         try:
             check_subj = new_tab.run_js("return document.getElementById('new-mail-subject') ? document.getElementById('new-mail-subject').value : null;", as_expr=True)
         except Exception:
@@ -696,7 +696,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         except Exception:
             check_body = None
 
-        time.sleep(1.0)
+        time.sleep(0.3)
 
         if (check_subj and len(str(check_subj).strip())>0) or (check_body and len(str(check_body).strip())>0):
             if interactive and sys.stdin.isatty():
@@ -741,9 +741,9 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         new_tab.run_js("var b=document.querySelector(\"input[value='確認画面へ'], input[value*='確認画面']\"); if(b) b.click();")
     except Exception:
         pass
-    time.sleep(random.uniform(2.0, 3.0))
+    time.sleep(random.uniform(0.8, 1.5))
 
-    http_err = drain_and_check_http(new_tab, "STEP4 確認画面へ遷移後", code, timeout=2.5)
+    http_err = drain_and_check_http(new_tab, "STEP4 確認画面へ遷移後", code, timeout=1.5)
     if http_err:
         return "emergency_stop"
 
@@ -763,9 +763,9 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         new_tab.run_js("var s=document.querySelector(\"input[value='メッセージを送信'], input[value*='送信']\"); if(s) s.click();")
     except Exception:
         pass
-    time.sleep(random.uniform(3.0, 5.0))
+    time.sleep(random.uniform(1.0, 2.0))
 
-    http_err = drain_and_check_http(new_tab, "STEP5 送信ボタンクリック後", code, timeout=2.5)
+    http_err = drain_and_check_http(new_tab, "STEP5 送信ボタンクリック後", code, timeout=1.5)
     if http_err:
         return "emergency_stop"
 
@@ -780,7 +780,7 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
     # 🕐 既存のアイドリング時間(15〜30秒/相手先サーバーへのアクセス集中を避けるためのもの)を、
     # 「タブを閉じた後(呼び出し元のループ側)」から「タブを閉じる前(ここ)」に付け替える。
     # 待機時間の合計は変わらない(スピード・送信件数への影響ゼロ)。
-    idle_sec = random.uniform(15.0, 30.0)
+    idle_sec = random.uniform(4.0, 8.0)
     print(f"⏳ [{code}] 完了ページへの反映待ち＋アクセス集中回避のため {idle_sec:.1f} 秒待機します（タブは維持したまま）...")
     time.sleep(idle_sec)
 
