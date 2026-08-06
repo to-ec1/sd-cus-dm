@@ -8,6 +8,7 @@ import glob
 import argparse
 from datetime import datetime
 from dotenv import load_dotenv
+import requests as req_lib
 import gspread
 from DrissionPage import ChromiumPage, ChromiumOptions
 
@@ -30,6 +31,19 @@ base_tab = None
 SS_ID = None
 CREDENTIAL_PATH = r"C:\data\dev\sd_cus\credentials.json"
 TOKEN_PATH = r"C:\data\dev\sd_cus\token.json"
+
+
+def notify_chat(text):
+    """Google ChatのWebhook URL(TEFFY_URL)へ状況通知をPOSTする(SD DM送信専用スペースへ、target='sd_dm'で振り分け)。
+    TEFFY_URL未設定、または送信失敗の場合は無視して処理を継続する(通知は補助機能であり本処理を止めない)。
+    ※ load_dotenv()はmain()内で呼ばれるため、ここではその都度環境変数を読みに行く。"""
+    teffy_url = os.environ.get("TEFFY_URL")
+    if not teffy_url:
+        return
+    try:
+        req_lib.post(teffy_url, json={"text": text, "target": "sd_dm"}, timeout=10)
+    except Exception as e_chat:
+        print(f"-> Chat通知失敗（無視して続行）: {e_chat}")
 
 
 def get_col(row_data, idx):
@@ -113,6 +127,87 @@ def drain(tab, step_label, timeout=2.0):
         pass
 
 
+def check_http_errors_in_packets(packets, domain="superdelivery.com"):
+    """
+    捕捉した通信パケットの中に、対象ドメインへの明確な異常応答(403/429/5xx)が
+    含まれていないか確認する。BOT検知・アクセス制限の直接的な兆候。
+    戻り値: 検知したステータスコード(int) または None
+    """
+    if not packets:
+        return None
+    if not isinstance(packets, list):
+        packets = [packets]
+    for p in packets:
+        try:
+            url = getattr(p, 'url', '') or ''
+            if domain not in url:
+                continue
+            status = None
+            if not getattr(p, 'is_failed', False) and getattr(p, 'response', None) is not None:
+                try:
+                    status = p.response.status
+                except Exception:
+                    status = None
+            if isinstance(status, int) and status in (403, 429, 500, 502, 503, 504):
+                return status
+        except Exception:
+            continue
+    return None
+
+
+def drain_and_check_http(tab, step_label, code, timeout=2.5):
+    """
+    drain()と同様に通信を消費しつつ、対象ドメインへの4xx/5xx応答が
+    無かったかを確認する。異常検知時はステータスコードを返す（正常時はNone）。
+    """
+    try:
+        packets = tab.listen.wait(count=999, timeout=timeout, fit_count=False)
+    except Exception:
+        packets = None
+    http_err = check_http_errors_in_packets(packets)
+    if http_err:
+        print(f"🚨 [{code}] {step_label}: 対象サイトからHTTP {http_err} 応答を検知しました。BOT検知/アクセス制限の可能性が高いため緊急停止します。")
+    return http_err
+
+
+def get_msgbox_state(tab):
+    """
+    #msgbox 要素のclass属性からメッセージ機能画面の現在の状態を判定する。
+    (dom_msgbox1.html / dom_kakunin2.html / dom_kanryo3.html の実際の差分から確定した判定方法)
+    戻り値: "edit"(入力画面) | "confirm"(確認画面) | "sent"(送信完了/送信一覧) | "unknown"(判定不能)
+    """
+    try:
+        cls = tab.run_js(
+            "var el=document.getElementById('msgbox'); return el ? el.className : '';",
+            as_expr=True
+        ) or ""
+    except Exception:
+        cls = ""
+    if "sent-mail-box" in cls:
+        return "sent"
+    if "confirm-message" in cls:
+        return "confirm"
+    if "edit-message" in cls:
+        return "edit"
+    return "unknown"
+
+
+def get_top_sent_message_title(tab):
+    """
+    送信完了後(#msgbox.sent-mail-box)の送信一覧の先頭メッセージの件名テキストを取得する。
+    実際に送信されたメッセージが一覧の先頭に反映されることを利用した最終確認用。
+    """
+    try:
+        title = tab.run_js(
+            "var li = document.querySelector('.mail-list-container li .mail-info .title');"
+            "return li ? li.innerText : '';",
+            as_expr=True
+        ) or ""
+    except Exception:
+        title = ""
+    return title.strip()
+
+
 def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2.5), interactive=False, save_debug=False, perform_send=True):
     url = f"https://www.superdelivery.com/l/management/customer/detail.do?code={code}"
     print(f"処理: {code} -> {url}")
@@ -130,10 +225,9 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
             print('ページ遷移に失敗しました')
             return "nav_failure"
     time.sleep(random.uniform(3.0, 5.0))
-    try:
-        drain(tab, "STEP1 詳細ページ遷移", timeout=2.5)
-    except Exception:
-        pass
+    http_err = drain_and_check_http(tab, "STEP1 詳細ページ遷移", code, timeout=2.5)
+    if http_err:
+        return "emergency_stop"
 
     # BOT検知・セッション切れチェック
     block_reason = detect_block(tab)
@@ -187,8 +281,8 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         try:
             tab.run_js("var b=document.querySelector(\"input[value*='メッセージ']\"); if(b) b.click();")
         except Exception:
-            print("メッセージボタンが見つかりません。スキップします。")
-            return False
+            print("メッセージボタンが見つかりません。緊急停止します（不正検知対策）。")
+            return "emergency_stop"
     else:
         try:
             btn.click()
@@ -196,8 +290,8 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
             try:
                 tab.run_js("var b=document.querySelector(\"input[value*='メッセージ']\"); if(b) b.click();")
             except Exception:
-                print("ボタンのクリックに失敗しました。スキップします。")
-                return False
+                print("ボタンのクリックに失敗しました。緊急停止します（不正検知対策）。")
+                return "emergency_stop"
 
     # 新しいタブまたは遷移先を待機
     new_tab = None
@@ -408,7 +502,8 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
                 break
 
     if not success_method:
-        # skip verbose confirmation; continue with send flow
+        # 入力アプローチがすべて失敗しても、その後の操作で入力されることがあるため
+        # ここでは即時の緊急停止は行わず、送信フローへ進める（過剰ブレーキ回避）。
         pass
     # デバッグ用に現在の編集タブのHTMLを保存（オプトイン）
     if save_debug:
@@ -445,10 +540,29 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         pass
     time.sleep(random.uniform(1.0, 2.0))
 
-    try:
-        drain(new_tab, "STEP4 確認画面へ遷移後", timeout=2.5)
-    except Exception:
-        pass
+    http_err = drain_and_check_http(new_tab, "STEP4 確認画面へ遷移後", code, timeout=2.5)
+    if http_err:
+        return "emergency_stop"
+
+    block_reason = detect_block(new_tab)
+    if block_reason == "login_redirect":
+        print(f"[{code}] STEP4でセッション切れを検出しました。安全のため処理を停止します。")
+        return "login_redirect"
+    elif block_reason == "blocked":
+        print(f"🚨 [{code}] STEP4でBOT検知/アクセス拒否と思われる表示を検知しました。緊急停止します。")
+        return "blocked"
+
+    # 実際に確認画面(#msgbox.confirm-message)へ遷移したかをDOM上で確認する
+    confirm_ok = False
+    for _ in range(10):
+        if get_msgbox_state(new_tab) == "confirm":
+            confirm_ok = True
+            break
+        time.sleep(0.5)
+    if not confirm_ok:
+        print(f"❌ [{code}] STEP4: 確認画面への遷移をDOM上で確認できませんでした（#msgboxのclassがconfirm-messageになりません）。緊急停止します。")
+        return "emergency_stop"
+
     # 送信ボタンを押す
     # If sending is disabled (night mode), skip actual send and return special code
     if not perform_send:
@@ -459,10 +573,31 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
         pass
     # wait after sending to ensure request completes
     time.sleep(random.uniform(1.5, 3.0))
-    try:
-        drain(new_tab, "STEP5 送信ボタンクリック後", timeout=2.5)
-    except Exception:
-        pass
+
+    http_err = drain_and_check_http(new_tab, "STEP5 送信ボタンクリック後", code, timeout=2.5)
+    if http_err:
+        return "emergency_stop"
+
+    block_reason = detect_block(new_tab)
+    if block_reason == "login_redirect":
+        print(f"[{code}] STEP5でセッション切れを検出しました。安全のため処理を停止します。")
+        return "login_redirect"
+    elif block_reason == "blocked":
+        print(f"🚨 [{code}] STEP5でBOT検知/アクセス拒否と思われる表示を検知しました。緊急停止します。")
+        return "blocked"
+
+    # 🎯 最重要の最終確認: 送信完了(#msgbox.sent-mail-box)への遷移、かつ送信一覧先頭の
+    # 件名が実際に送信したsubjectと一致するかをDOM上で確認してから初めて成功とみなす。
+    sent_ok = False
+    for _ in range(10):
+        if get_msgbox_state(new_tab) == "sent":
+            top_title = get_top_sent_message_title(new_tab)
+            if top_title and (top_title == subject or top_title.startswith(subject)):
+                sent_ok = True
+            else:
+                print(f"⚠️ [{code}] STEP5: 送信一覧には遷移しましたが、先頭の件名が一致しません（期待:'{subject}' / 実際:'{top_title}'）。")
+            break
+        time.sleep(0.5)
 
     # タブを閉じて元に戻る
     try:
@@ -473,6 +608,10 @@ def send_dm_for_code(browser_page, tab, code, subject, body, delay_range=(1.0, 2
             pass
     except Exception:
         pass
+
+    if not sent_ok:
+        print(f"❌ [{code}] STEP5: 送信完了をDOM上で確認できませんでした。実際に送信された保証がないため、安全のため処理全体を停止します。")
+        return "send_unconfirmed"
 
     return True
 
@@ -492,8 +631,9 @@ def main():
 
     # night window: 20:00-07:59 local time (host system time)
     hour_now = datetime.now().hour
-    if hour_now >= 20 or hour_now < 8:
-        print("夜間時間帯のため処理を停止します（20:00-08:00）。終了します。")
+    if hour_now >= 21 or hour_now < 7:
+        print("夜間時間帯のため処理を停止します（21:00-07:00）。終了します。")
+        notify_chat(f"🌙【SD DM送信・ローカル】夜間時間帯（現在{hour_now}時）のため今回は起動見送りとなりました。")
         return
 
     # not night: allow sends unless per-record check later overrides
@@ -562,8 +702,13 @@ def main():
             print(f"スプレッドシートを開きました: {ss_id_use}")
         except Exception as e:
             print('スプレッドシートを開けません:', e)
+            notify_chat(f"🛑【SD DM送信・ローカル】エラー終了: スプレッドシートを開けませんでした。\n詳細: {e}")
             return
     interactive_flag = True if args.interactive else False
+
+    # consecutive failure protection: stop if many non-successes occur
+    consecutive_failures = 0
+    MAX_CONSECUTIVE_FAILURES = 5
 
     # Ensure sh_local variable exists (may have been set above) — fall back to module-level `sh`
     try:
@@ -596,6 +741,7 @@ def main():
     # Require subject and body from DM sheet only
     if not subject or not body:
         print("エラー: スプレッドシートの 'DM' シートの A2（件名）または B2（本文）が空です。処理を中止します。")
+        notify_chat("🛑【SD DM送信・ローカル】エラー終了: スプレッドシート 'DM'シートの件名(A2)または本文(B2)が空のため中止しました。")
         sys.exit(1)
 
     if args.code:
@@ -603,7 +749,7 @@ def main():
         code_use = c
         # re-evaluate allow_send at call time to handle runtime crossings into night window
         hour_now = datetime.now().hour
-        allow_send_now = not (hour_now >= 20 or hour_now < 8)
+        allow_send_now = not (hour_now >= 21 or hour_now < 7)
         res = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
         # single-line summary output
         if res is True:
@@ -627,14 +773,21 @@ def main():
             code_use = code
             try:
                 hour_now = datetime.now().hour
-                allow_send_now = not (hour_now >= 20 or hour_now < 8)
+                allow_send_now = not (hour_now >= 21 or hour_now < 7)
                 result = send_dm_for_code(page, base_tab, code_use, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
-                if result in ("blocked", "login_redirect", "nav_failure"):
-                    print(f"処理を中断しました（理由: {result}）。")
+                if result in ("blocked", "login_redirect", "nav_failure", "emergency_stop", "send_unconfirmed"):
+                    print(f"処理を中断しました（理由: {result}）。安全に停止します。")
                     return
                 if result == "night_disabled":
                     print(f"{code_use} の送信は夜間のためスキップされました")
                     continue
+                if result is True:
+                    consecutive_failures = 0
+                else:
+                    consecutive_failures += 1
+                    if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                        print(f"連続エラーが {consecutive_failures} 回発生しました。安全に停止します。")
+                        return
             except Exception as e:
                 print(f"{code} の処理中にエラー: {e}")
             time.sleep(random.uniform(1.0, 2.0))
@@ -647,11 +800,16 @@ def main():
 
     records = ws_local.get_all_values()
 
+    # 終了理由トラッカー（ループ終了後にまとめて1通のChat通知を送るため）
+    total_sent_count = 0
+    end_reason = None
+
     for i, row in enumerate(records):
         # runtime: stop if exceeded max runtime
         try:
             if time.time() - START_TIME > MAX_RUNTIME_SEC:
                 print("⏰ 実行時間上限（6h）到達: 安全終了します")
+                end_reason = "runtime_limit"
                 break
         except Exception:
             pass
@@ -664,15 +822,18 @@ def main():
             continue
         try:
             hour_now = datetime.now().hour
-            allow_send_now = not (hour_now >= 20 or hour_now < 8)
+            allow_send_now = not (hour_now >= 21 or hour_now < 7)
             result = send_dm_for_code(page, base_tab, code, subject, body, interactive=interactive_flag, save_debug=save_debug, perform_send=allow_send_now)
-            if result in ("blocked", "login_redirect", "nav_failure"):
-                print(f"処理を中断しました（理由: {result}）。処理済み件数でスプレッドシートは更新済みです。")
+            if result in ("blocked", "login_redirect", "nav_failure", "emergency_stop", "send_unconfirmed"):
+                print(f"処理を中断しました（理由: {result}）。処理済み件数でスプレッドシートは更新済みです。安全に停止します。")
+                end_reason = f"error:{result}"
                 break
             if result == "night_disabled":
                 print(f"{code} の送信は夜間のためスキップされました")
                 continue
             if result is True:
+                consecutive_failures = 0
+                total_sent_count += 1
                 now = datetime.now()
                 date_str = f"{now.month}/{now.day}"
                 rownum = i + 1
@@ -682,9 +843,25 @@ def main():
                 except Exception:
                     pass
                 print(f"{code} のメッセージ送信完了。エラーなし")
+            else:
+                consecutive_failures += 1
+                if consecutive_failures >= MAX_CONSECUTIVE_FAILURES:
+                    print(f"連続エラーが {consecutive_failures} 回発生しました。安全に停止します。")
+                    end_reason = "consecutive_failures"
+                    break
         except Exception as e:
             print(f"{code} の処理中にエラー: {e}")
         time.sleep(random.uniform(1.0, 3.0))
+
+    # ── 📮 終了理由に応じたChat通知（①エラー終了 ②時間切れ終了 ③送信対象0件で正常終了） ──
+    if end_reason == "runtime_limit":
+        notify_chat(f"⏰【SD DM送信・ローカル】時間切れ終了: 実行時間の安全上限（6時間）に到達したため終了しました。今回の送信数: {total_sent_count}件。")
+    elif end_reason == "consecutive_failures":
+        notify_chat(f"🛑【SD DM送信・ローカル】エラー終了: 連続失敗回数が上限に達したため緊急停止しました。今回の送信数: {total_sent_count}件。")
+    elif end_reason and end_reason.startswith("error:"):
+        notify_chat(f"🛑【SD DM送信・ローカル】エラー終了: 危険検知（理由: {end_reason.split(':',1)[1]}）のため緊急停止しました。今回の送信数: {total_sent_count}件。")
+    elif end_reason is None and total_sent_count == 0:
+        notify_chat("ℹ️【SD DM送信・ローカル】送信対象なしで正常終了: 全行を走査しましたが送信対象のコードが0件でした。")
 
 
 if __name__ == '__main__':
@@ -702,4 +879,5 @@ if __name__ == '__main__':
             pass
     except Exception as e:
         print(f'\n予期しない例外: {e}')
+        notify_chat(f"🛑【SD DM送信・ローカル】エラー終了: 予期しない致命的例外が発生しました。\n詳細: {e}")
         raise
