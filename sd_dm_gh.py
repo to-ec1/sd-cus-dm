@@ -961,22 +961,13 @@ def send_dm_for_code(browser_page, tab, code, subject, body, image_paths=None, d
 def kill_zombie_chrome():
     """残存・孤立しているChromeプロセスをOSレベルで強力かつ確実に一掃する"""
     sys_name = platform.system()
-    profile_marker = str(CHROME_PROFILE_DIR)
-    print(f"🧹 本ツール専用プロファイル（{profile_marker}）を使っている残留Chromeプロセスのみ終了します"
-          f"（ユーザーが普段使っている既存のChromeウィンドウ・プロファイルには一切干渉しません）...")
+    print("🧹 ポート競合とゾンビ起動を防ぐため、既存のChromeプロセスを強制終了します...")
     try:
-        if sys_name == "Windows":
-            # コマンドラインに本ツール専用プロファイルのパスを含む chrome.exe のみを対象にする。
-            # taskkill /IM chrome.exe のような全チェックはユーザーの通常ブラウザを巻き込むため使用しない。
-            ps_cmd = (
-                "Get-CimInstance Win32_Process -Filter \"Name='chrome.exe'\" | "
-                f"Where-Object {{ $_.CommandLine -like '*{profile_marker}*' }} | "
-                "ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }"
-            )
-            subprocess.run(["powershell", "-NoProfile", "-Command", ps_cmd],
-                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        elif sys_name == "Linux":
-            subprocess.run(["pkill", "-9", "-f", profile_marker], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if sys_name == "Linux":
+            subprocess.run(["pkill", "-9", "-f", "chrome"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(["pkill", "-9", "-f", "chromium"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        elif sys_name == "Windows":
+            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe", "/T"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except Exception as e:
         print(f"⚠️ プロセス終了処理中にエラー（無視して続行）: {e}")
 
@@ -1224,33 +1215,6 @@ def main():
             print("✅ サービスアカウントによる認証に成功しました。")
         else:
             print(f"\n🔑 OAuth（認証ファイル）による明示的構築プロセスを開始します...")
-
-            if not os.path.exists(TOKEN_PATH):
-                if not os.path.exists(CREDENTIAL_PATH):
-                    raise FileNotFoundError(f"credentials.json が見つかりません: {CREDENTIAL_PATH}")
-                print(f"⚠️ token.json が見つからないため、新規にOAuth認証フローを実行します。")
-                print(f"🌐 ブラウザで認証画面（Googleアカウントのログイン・権限許可）が開きます。画面の指示に従って許可してください...")
-                flow = InstalledAppFlow.from_client_secrets_file(
-                    CREDENTIAL_PATH,
-                    scopes=["https://www.googleapis.com/auth/spreadsheets", "https://www.googleapis.com/auth/drive"]
-                )
-                new_creds = flow.run_local_server(port=0)
-                fresh_token_data = {
-                    "token": new_creds.token,
-                    "refresh_token": new_creds.refresh_token,
-                    "token_uri": new_creds.token_uri,
-                    "client_id": new_creds.client_id,
-                    "client_secret": new_creds.client_secret,
-                    "scopes": new_creds.scopes,
-                    "expiry": new_creds.expiry.isoformat() if new_creds.expiry else None
-                }
-                with open(TOKEN_PATH, "w", encoding="utf-8") as f:
-                    json.dump(fresh_token_data, f, indent=2)
-                if not fresh_token_data.get("refresh_token"):
-                    print("⚠️ 【警告】発行されたtoken.jsonにrefresh_tokenが含まれていません。"
-                          "Googleアカウント側で本アプリの過去のアクセス許可が残っている場合に起きます。"
-                          "https://myaccount.google.com/permissions で本アプリのアクセスを一度取り消してから再実行してください。")
-                print(f"✅ 新規token.jsonを発行して保存しました: {TOKEN_PATH}")
 
             with open(CREDENTIAL_PATH, "r", encoding="utf-8") as f:
                 creds_info = json.load(f)
