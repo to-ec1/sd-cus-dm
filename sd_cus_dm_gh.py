@@ -7,6 +7,7 @@ import random
 import math
 import glob
 import json
+import base64
 import argparse
 import subprocess
 import platform
@@ -18,6 +19,12 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 import google.auth.exceptions
 from DrissionPage import ChromiumPage, ChromiumOptions
+
+try:
+    from nacl import utils, public
+    HAS_NACL = True
+except ImportError:
+    HAS_NACL = False
 
 load_dotenv()
 
@@ -35,6 +42,74 @@ def notify_chat(text):
         req_lib.post(TEFFY_URL, json={"text": text, "target": "sd_dm"}, timeout=10)
     except Exception as e_chat:
         print(f"-> Chat通知失敗（無視して続行）: {e_chat}")
+
+def update_github_secret(secret_name, secret_value):
+    """GitHub APIを使用してリポジトリのSecretsを更新する。
+    トークンが期限切れで更新された場合、新しいトークンをGitHub Secretsに保存する。
+    GitHub Actions環境で実行される場合のみ動作する。
+    """
+    if not HAS_NACL:
+        print("⚠️ PyNaCl ライブラリがインストールされていないため、GitHub Secret更新をスキップします。")
+        return False
+    
+    github_token = os.getenv("GITHUB_TOKEN")
+    github_repo = os.getenv("GITHUB_REPOSITORY")
+    
+    # GitHub Actions環境でない場合はスキップ
+    if not github_token or not github_repo:
+        print("⚠️ GitHub Actions環境で実行されていないため、Secret更新をスキップします。")
+        return False
+    
+    try:
+        owner, repo_name = github_repo.split("/", 1)
+    except ValueError:
+        print(f"⚠️ GITHUB_REPOSITORY フォーマットが不正です: {github_repo}")
+        return False
+    
+    headers = {"Authorization": f"token {github_token}", "Accept": "application/vnd.github.v3+json"}
+    
+    # ステップ1: リポジトリの公開鍵を取得
+    print(f"🔑 GitHub Secret '{secret_name}' を更新するため、公開鍵を取得中...")
+    try:
+        url = f"https://api.github.com/repos/{owner}/{repo_name}/actions/secrets/public-key"
+        resp = req_lib.get(url, headers=headers, timeout=10)
+        resp.raise_for_status()
+        key_data = resp.json()
+        public_key = key_data.get("key")
+        key_id = key_data.get("key_id")
+        
+        if not public_key or not key_id:
+            print(f"❌ 公開鍵の取得に失敗: キーが含まれていません")
+            return False
+    except Exception as e:
+        print(f"❌ GitHub公開鍵の取得に失敗: {e}")
+        return False
+    
+    # ステップ2: シークレット値を公開鍵で暗号化
+    print(f"🔐 シークレット値を暗号化中...")
+    try:
+        public_key_obj = public.PublicKey(public_key.encode(), encoder=public.Base64Encoder)
+        sealed = public.SealedBox(public_key_obj).encrypt(secret_value.encode())
+        encrypted_value = base64.b64encode(sealed.ciphertext).decode()
+    except Exception as e:
+        print(f"❌ シークレット値の暗号化に失敗: {e}")
+        return False
+    
+    # ステップ3: GitHub API経由でSecretを更新
+    print(f"📤 GitHub Secret をリポジトリに保存中...")
+    try:
+        url = f"https://api.github.com/repos/{owner}/{repo_name}/actions/secrets/{secret_name}"
+        payload = {
+            "encrypted_value": encrypted_value,
+            "key_id": key_id
+        }
+        resp = req_lib.put(url, json=payload, headers=headers, timeout=10)
+        resp.raise_for_status()
+        print(f"✅ GitHub Secret '{secret_name}' を正常に更新しました。")
+        return True
+    except Exception as e:
+        print(f"❌ GitHub Secret '{secret_name}' の更新に失敗: {e}")
+        return False
 
 # ── 認証情報のパス（GitHub Actions上での一時出力パス） ─────────────────────────
 CREDENTIAL_PATH = "./credentials.json"
@@ -1164,6 +1239,10 @@ def main():
                     with open(TOKEN_PATH, "w", encoding="utf-8") as f:
                         json.dump(new_token_data, f, indent=2)
                     print("💾 一時トークンファイルを正常にアップデートしました。")
+                    
+                    # 新しいトークンをGitHub Secretsに保存（GitHub Actions環境で実行中の場合）
+                    token_json_str = json.dumps(new_token_data, indent=2)
+                    update_github_secret("GSPREAD_TOKEN_JSON", token_json_str)
                 except google.auth.exceptions.RefreshError as e_refresh:
                     # Googleが返した生のエラーレスポンス（HTTPレスポンス全体）を完全にコンソールに書き出す
                     print("\n" + "!"*60)
