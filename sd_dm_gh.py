@@ -692,6 +692,21 @@ def send_dm_for_code(browser_page, tab, code, subject, body, image_paths=None, d
                 print(f"  └ [{img_idx}/{len(image_paths)}枚目] を選択中...")
                 file_input.input(img_path)
 
+                print(new_tab.run_js(
+                    """
+                    (function() {
+                        var el = document.querySelector('input[type="file"]');
+                        return JSON.stringify({
+                            filesLength: el && el.files ? el.files.length : null,
+                            fileName: el && el.files && el.files[0] ? el.files[0].name : null,
+                            fileSize: el && el.files && el.files[0] ? el.files[0].size : null,
+                            fileInputCount: document.querySelectorAll('input[type="file"]').length
+                        });
+                    })()
+                    """,
+                    as_expr=True
+                ))
+
                 this_file_ok = False
                 for _ in range(15):  # 最大15秒待機
                     time.sleep(1.0)
@@ -735,6 +750,26 @@ def send_dm_for_code(browser_page, tab, code, subject, body, image_paths=None, d
                 if attach_error_detected:
                     break
                 if not this_file_ok:
+                    print(new_tab.run_js(
+                        """
+                        (function() {
+                            var list = document.querySelector('.attaching-list');
+                            var loading = document.querySelector('.attaching-list .attaching-loading');
+                            var loadingParent = loading ? loading.parentElement : null;
+                            var error = document.querySelector('.attachment .fo-errors-box');
+                            return JSON.stringify({
+                                attachedCount: document.querySelectorAll('.attaching-list div span:not(.attaching-loading)').length,
+                                listText: list ? list.innerText : null,
+                                listHtml: list ? list.innerHTML : null,
+                                loadingDisplay: loadingParent ? getComputedStyle(loadingParent).display : null,
+                                loadingVisibility: loadingParent ? getComputedStyle(loadingParent).visibility : null,
+                                errorText: error ? error.innerText : null,
+                                errorDisplay: error ? getComputedStyle(error).display : null
+                            });
+                        })()
+                        """,
+                        as_expr=True
+                    ))
                     print(f"❌ [画像添付エラー] {img_idx}枚目の添付確認がタイムアウトしました。")
                     break
             else:
